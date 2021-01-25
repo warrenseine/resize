@@ -13,7 +13,6 @@ import {
   NativeModules,
   AppRegistry,
   StatusBar,
-  Pressable,
 } from 'react-native';
 import RNHTMLtoPDF from 'react-native-html-to-pdf';
 import RNPrint from 'react-native-print';
@@ -25,8 +24,10 @@ import {
 } from 'react-native-image-picker';
 import NavigationBar from 'react-native-navbar';
 import RNFetchBlob from 'rn-fetch-blob';
+import Dialog from 'react-native-dialog';
 import Icon from 'react-native-vector-icons/Ionicons';
 import {name as appName} from './app.json';
+import {montezFontDataUri} from './Montez';
 
 type ActionExtensionCloseHandler = () => void;
 type ActionExtensionPayload = {type: string; value: string};
@@ -95,13 +96,11 @@ const hasAndroidPermission = async () => {
   return status === 'granted';
 };
 
-const convertToPDF = async (
+const convertImageToPDF = async (
   image: OriginalImage,
   setPdfFilePath: (filePath: string) => void,
 ) => {
-  console.log(`PDF image: ${image.fileName}`);
-  console.log(`Image path: ${image.uri}`);
-  console.log(`Image b64: ${image.base64?.substring(0, 100)}`);
+  console.log(`PDF image: ${image.uri}`);
   const rotated = image.width! > image.height!;
 
   const html = `
@@ -110,17 +109,113 @@ const convertToPDF = async (
     </div>
   `;
 
+  await convertHTMLtoPDF(setPdfFilePath, html, image.fileName!, rotated);
+};
+
+const hashCode = (s: string) => {
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) {
+    let chr = s.charCodeAt(i);
+    // eslint-disable-next-line no-bitwise
+    hash = (hash << 5) - hash + chr;
+    // eslint-disable-next-line no-bitwise
+    hash |= 0;
+  }
+  return hash;
+};
+
+const fitTextToPDF = async (
+  text: string,
+  cursive: boolean,
+  setPdfFilePath: (filePath: string | undefined) => void,
+) => {
+  let currentFontSize = 0;
+  let lowerFontSize = 1;
+  let upperFontSize = 256;
+  let bestFontSize: number | undefined;
+  let bestPdfFilePath: string | undefined;
+  let lastPdfFilePath: string | undefined;
+
+  // Safe exit in case the algorithm goes wild.
+  let iterationLeft = 20;
+
+  while (lowerFontSize < upperFontSize) {
+    if (iterationLeft-- === 0) {
+      break;
+    }
+
+    currentFontSize = Math.floor((lowerFontSize + upperFontSize) / 2);
+
+    const success = await convertTextToPDF(
+      text,
+      cursive,
+      currentFontSize,
+      (filePath: string) => (lastPdfFilePath = filePath),
+    );
+
+    if (success && currentFontSize > (bestFontSize || 0)) {
+      bestFontSize = currentFontSize;
+      bestPdfFilePath = lastPdfFilePath;
+
+      lowerFontSize = currentFontSize;
+    } else {
+      upperFontSize = currentFontSize - 1;
+    }
+  }
+
+  setPdfFilePath(bestPdfFilePath);
+};
+
+const convertTextToPDF = (
+  text: string,
+  cursive: boolean,
+  fontSize: number,
+  setPdfFilePath: (filePath: string) => void,
+) => {
+  console.log(`PDF text: ${text}`);
+
+  const fontFamily = cursive ? 'Montez' : 'sans-serif';
+
+  const html = `
+    <style>
+    @font-face {
+      font-family: "Montez";
+      src: url("${montezFontDataUri}") format("truetype");
+      font-weight: 400;
+      font-style: normal;
+    }
+    </style>
+    <style> p { white-space: pre-line; } </style>
+    <div style="height: 100%; width: 100%">
+      <p style="font-size: ${fontSize}px; font-family: '${fontFamily}';">${text}</div>
+    </div>
+  `;
+
+  const fileNameId = hashCode(`${text}-${fontSize}-${Number(cursive)}`);
+
+  return convertHTMLtoPDF(setPdfFilePath, html, `text-${fileNameId}`);
+};
+
+const convertHTMLtoPDF = async (
+  setPdfFilePath: (filePath: string) => void,
+  html: string,
+  fileName: string,
+  rotated?: boolean,
+): Promise<boolean> => {
   try {
     const pdfHeight = 792;
     const pdfWidth = 612;
 
-    const results = await RNHTMLtoPDF.convert({
+    // Missing property in type declarations.
+    type PdfResult = RNHTMLtoPDF.Pdf & {numberOfPages: string};
+
+    const results = (await RNHTMLtoPDF.convert({
       html,
-      fileName: image.fileName,
+      fileName,
       bgColor: '#ffffff',
       width: rotated ? pdfHeight : pdfWidth,
       height: rotated ? pdfWidth : pdfHeight,
-    });
+    })) as PdfResult;
 
     let filePath = results.filePath;
 
@@ -131,12 +226,14 @@ const convertToPDF = async (
     console.log(`PDF built: ${filePath}`);
 
     setPdfFilePath(filePath);
+    return results.numberOfPages === '1';
   } catch (error) {
     console.error('Failed to convert to PDF');
-    return Alert.alert(
+    Alert.alert(
       'Unable to convert to PDF',
       'Check the console for full the error message',
     );
+    return false;
   }
 };
 
@@ -225,7 +322,25 @@ const App = () => {
     OriginalImage | undefined
   >();
   const [pdfFilePath, setPdfFilePath] = useState<string | undefined>();
+  const [textPromptVisible, setTextPromptVisible] = useState<boolean>(false);
+  const [textCursive, setTextCursive] = useState<boolean>(false);
+  const [promptText, setPromptText] = useState<string | undefined>(undefined);
+  const [text, setText] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState<boolean>(false);
+
+  const closeTextPrompt = (inputText: string | undefined) => {
+    clearEverything();
+    setText(inputText);
+  };
+
+  const clearEverything = () => {
+    setLoading(false);
+    setOriginalImage(undefined);
+    setPdfFilePath(undefined);
+    setTextPromptVisible(false);
+    setPromptText(undefined);
+    setText(undefined);
+  };
 
   useEffect(() => {
     if (getData) {
@@ -235,12 +350,17 @@ const App = () => {
 
   useEffect(() => {
     if (originalImage) {
-      convertToPDF(originalImage, setPdfFilePath);
+      convertImageToPDF(originalImage, setPdfFilePath);
     }
   }, [originalImage, setPdfFilePath]);
 
+  useEffect(() => {
+    if (text && !textPromptVisible) {
+      fitTextToPDF(text, textCursive, setPdfFilePath);
+    }
+  }, [text, textCursive, textPromptVisible, setPdfFilePath]);
+
   const {width, height} = getPdfViewportSize(originalImage);
-  console.log(width, height, Dimensions.get('screen'));
 
   return (
     <View style={styles.container}>
@@ -249,9 +369,9 @@ const App = () => {
         <NavigationBar
           title={{title: 'Resize for Print'}}
           leftButton={
-            done ? (
+            done || pdfFilePath ? (
               <TouchableOpacity
-                onPress={() => done()}
+                onPress={() => (done ? done() : clearEverything())}
                 style={styles.navBarButton}>
                 <Text style={styles.buttonText}>Close</Text>
               </TouchableOpacity>
@@ -284,21 +404,32 @@ const App = () => {
             hidden: true,
           }}
         />
-        {!originalImage && (
+        {!pdfFilePath && (
           <View style={styles.hintContainer}>
-            <TouchableOpacity
-              onPress={() => getPhoto(setOriginalImage, setLoading)}
-              style={styles.hint}>
-              <Icon
-                name="image-outline"
-                style={[styles.buttonText, styles.buttonIcon]}
-              />
-              {loading ? (
-                <Text style={styles.buttonText}>Loading...</Text>
-              ) : (
-                <Text style={styles.buttonText}>Tap to select an image</Text>
-              )}
-            </TouchableOpacity>
+            {loading ? (
+              <Text style={styles.buttonText}>Loading...</Text>
+            ) : (
+              <>
+                <TouchableOpacity
+                  onPress={() => getPhoto(setOriginalImage, setLoading)}
+                  style={styles.hint}>
+                  <Icon
+                    name="image-outline"
+                    style={[styles.buttonText, styles.buttonIcon]}
+                  />
+                  <Text style={styles.buttonText}>Tap to select an image</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setTextPromptVisible(true)}
+                  style={styles.hint}>
+                  <Icon
+                    name="document-text-outline"
+                    style={[styles.buttonText, styles.buttonIcon]}
+                  />
+                  <Text style={styles.buttonText}>Tap to enter text</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         )}
         {showOriginalImage && originalImage ? (
@@ -313,10 +444,43 @@ const App = () => {
             />
           </>
         ) : null}
-        {showPdf && originalImage && pdfFilePath && (
-          <Pressable
-            onPressOut={() => !done && getPhoto(setOriginalImage, setLoading)}
-            style={styles.pdfContainer}>
+        <Dialog.Container
+          visible={textPromptVisible}
+          statusBarTranslucent
+          contentStyle={styles.dialogContentStyle}>
+          <Dialog.Title>Text</Dialog.Title>
+          <Dialog.Input
+            placeholder="Text"
+            multiline={true}
+            autoCapitalize="none"
+            autoCompleteType="off"
+            autoCorrect={false}
+            autoFocus={true}
+            numberOfLines={16}
+            textAlignVertical="bottom"
+            onChangeText={setPromptText}
+            value={promptText}
+            wrapperStyle={styles.textInputPrompt}
+          />
+          <Dialog.Switch
+            label="Cursive"
+            value={textCursive}
+            onValueChange={(value: boolean) => setTextCursive(value)}
+          />
+          <Dialog.Button
+            label="Cancel"
+            onPress={() => closeTextPrompt(undefined)}
+          />
+          <Dialog.Button
+            label="Confirm"
+            disabled={!promptText}
+            style={!promptText ? styles.disabled : null}
+            onPress={() => closeTextPrompt(promptText)}
+          />
+        </Dialog.Container>
+
+        {showPdf && pdfFilePath && (
+          <View style={styles.pdfContainer}>
             <Pdf
               source={{uri: pdfFilePath}}
               fitPolicy={0}
@@ -326,7 +490,7 @@ const App = () => {
                 height,
               }}
             />
-          </Pressable>
+          </View>
         )}
       </SafeAreaView>
     </View>
@@ -358,7 +522,7 @@ const styles = StyleSheet.create({
   },
   hintContainer: {
     flex: 1,
-    flexDirection: 'row',
+    flexDirection: 'column',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -375,6 +539,12 @@ const styles = StyleSheet.create({
   },
   image: {
     backgroundColor: 'grey',
+  },
+  textInputPrompt: {
+    height: 248,
+  },
+  dialogContentStyle: {
+    marginBottom: 128,
   },
   pdfContainer: {
     flex: 1,
