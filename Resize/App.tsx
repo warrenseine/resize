@@ -98,18 +98,22 @@ const hasAndroidPermission = async () => {
 
 const convertImageToPDF = async (
   image: OriginalImage,
+  grayscaleEnabled: boolean,
   setPdfFilePath: (filePath: string) => void,
 ) => {
   console.log(`PDF image: ${image.uri}`);
   const rotated = image.width! > image.height!;
+  const filter = grayscaleEnabled ? 'grayscale(1)' : 'none';
 
   const html = `
     <div style="height: 100%">
-      <img src="data:image/jpeg;base64,${image.base64}" style="object-fit: contain; max-width: 100%; height: 100%; margin: 0 auto;">
+      <img src="data:image/jpeg;base64,${image.base64}" style="object-fit: contain; max-width: 100%; height: 100%; margin: 0 auto; filter: ${filter};">
     </div>
   `;
 
-  await convertHTMLtoPDF(setPdfFilePath, html, image.fileName!, rotated);
+  const fileName = `${image.fileName!}-${grayscaleEnabled}`;
+
+  await convertHTMLtoPDF(setPdfFilePath, html, fileName, rotated);
 };
 
 const hashCode = (s: string) => {
@@ -327,6 +331,7 @@ const App = () => {
   const [promptText, setPromptText] = useState<string | undefined>(undefined);
   const [text, setText] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState<boolean>(false);
+  const [grayscaleEnabled, setGrayscaledEnabled] = useState<boolean>(false);
 
   const closeTextPrompt = (inputText: string | undefined) => {
     clearEverything();
@@ -350,9 +355,9 @@ const App = () => {
 
   useEffect(() => {
     if (originalImage) {
-      convertImageToPDF(originalImage, setPdfFilePath);
+      convertImageToPDF(originalImage, grayscaleEnabled, setPdfFilePath);
     }
-  }, [originalImage, setPdfFilePath]);
+  }, [originalImage, grayscaleEnabled, setPdfFilePath]);
 
   useEffect(() => {
     if (text && !textPromptVisible) {
@@ -490,6 +495,12 @@ const App = () => {
                 height,
               }}
             />
+            <Dialog.Switch
+              value={grayscaleEnabled}
+              label="Grayscale"
+              onValueChange={(value: boolean) => setGrayscaledEnabled(value)}
+              style={styles.toggle}
+            />
           </View>
         )}
       </SafeAreaView>
@@ -552,6 +563,9 @@ const styles = StyleSheet.create({
   },
   disabled: {
     opacity: 0.5,
+  },
+  toggle: {
+    marginTop: 4,
   },
 });
 
